@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Local QR Scanner (Offline)</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 16px; }
+    video, canvas { width: 100%; max-width: 720px; border: 1px solid #ccc; border-radius: 8px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: start; }
+    .col { flex: 1 1 320px; }
+    pre { white-space: pre-wrap; word-break: break-word; padding: 12px; border: 1px solid #ddd; border-radius: 8px; background: #fafafa; }
+    button, select { padding: 8px 10px; }
+    .hint { color: #555; font-size: 0.95rem; }
+  </style>
+</head>
+<body>
+  <h1>Local QR Scanner (Offline)</h1>
+  <p class="hint">Everything runs locally in your browser. No data is uploaded anywhere.</p>
+
+  <div style="margin: 12px 0;">
+    <label for="cameraSelect">Camera:</label>
+    <select id="cameraSelect"></select>
+    <button id="startBtn">Start</button>
+    <button id="stopBtn" disabled>Stop</button>
+    <button id="copyBtn" disabled>Copy result</button>
+  </div>
+
+  <div class="row">
+    <div class="col">
+      <video id="video" playsinline muted></video>
+      <canvas id="canvas" hidden></canvas>
+    </div>
+    <div class="col">
+      <h3>Decoded text</h3>
+      <pre id="output">(none yet)</pre>
+      <div class="hint" id="status"></div>
+    </div>
+  </div>
+
+  <!-- Local library file (downloaded once) -->
+  <script src="./jsqr.js"></script>
+
+  <script>
+    const video = document.getElementById("video");
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+    const output = document.getElementById("output");
+    const statusEl = document.getElementById("status");
+
+    const cameraSelect = document.getElementById("cameraSelect");
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const copyBtn = document.getElementById("copyBtn");
+
+    let stream = null;
+    let rafId = null;
+    let lastDecoded = "";
+
+    function setStatus(msg) { statusEl.textContent = msg; }
+
+    async function listCameras() {
+      cameraSelect.innerHTML = "";
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const cams = devices.filter(d => d.kind === "videoinput");
+
+      if (cams.length === 0) {
+        const opt = document.createElement("option");
+        opt.textContent = "No cameras found";
+        opt.value = "";
+        cameraSelect.appendChild(opt);
+        cameraSelect.disabled = true;
+        return;
+      }
+
+      cameraSelect.disabled = false;
+      cams.forEach((cam, idx) => {
+        const opt = document.createElement("option");
+        opt.value = cam.deviceId;
+        opt.textContent = cam.label || `Camera ${idx + 1}`;
+        cameraSelect.appendChild(opt);
+      });
+    }
+
+    async function startCamera() {
+      stopCamera(); // ensure clean start
+
+      const deviceId = cameraSelect.value || undefined;
+
+      const constraints = {
+        audio: false,
+        video: deviceId ? { deviceId: { exact: deviceId } } : { facingMode: "environment" }
+      };
+
+      setStatus("Requesting camera permission…");
+      stream = await navigator.mediaDevices.getUserMedia(constraints);
+      video.srcObject = stream;
+
+      await video.play();
+      setStatus("Scanning… hold the QR code steady.");
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+
+      // If labels were hidden until permission, refresh camera names.
+      await listCameras();
+
+      scanLoop();
+    }
+
+    function stopCamera() {
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = null;
+
+      if (stream) {
+        stream.getTracks().forEach(t => t.stop());
+        stream = null;
+      }
+
+      video.srcObject = null;
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      setStatus("Stopped.");
+    }
+
+    function scanLoop() {
+      if (!video.videoWidth || !video.videoHeight) {
+        rafId = requestAnimationFrame(scanLoop);
+        return;
+      }
+
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+      // jsQR(imageData.data, width, height, options)
+      const code = jsQR(imageData.data, imageData.width, imageData.height, {
+        inversionAttempts: "attemptBoth"
+      });
+
+      if (code && code.data) {
+        if (code.data !== lastDecoded) {
+          lastDecoded = code.data;
+          output.textContent = code.data;
+          copyBtn.disabled = false;
+          setStatus("Decoded! (keeps scanning for changes)");
+        }
+      }
+
+      rafId = requestAnimationFrame(scanLoop);
+    }
+
+    copyBtn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(output.textContent);
+        setStatus("Copied to clipboard.");
+      } catch (e) {
+        setStatus("Copy failed (browser permission issue). You can still select & copy manually.");
+      }
+    });
+
+    startBtn.addEventListener("click", async () => {
+      try {
+        await startCamera();
+      } catch (e) {
+        console.error(e);
+        setStatus("Failed to start camera. Try a different browser or check permissions.");
+      }
+    });
+
+    stopBtn.addEventListener("click", stopCamera);
+
+    // Initialize
+    (async () => {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setStatus("Your browser doesn’t support getUserMedia(). Try Firefox/Chrome.");
+        startBtn.disabled = true;
+        return;
+      }
+
+      // Some browsers only reveal device labels after first permission grant,
+      // but we can still populate the list.
+      await listCameras();
+
+      setStatus("Pick a camera and press Start.");
+    })();
+  </script>
+</body>
+</html>
